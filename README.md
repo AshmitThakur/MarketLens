@@ -166,7 +166,7 @@ npm.cmd run build
 npm.cmd audit --omit=dev
 ```
 
-The current release passes **29 backend, analytics, API, and mocked-AI tests**.
+The current release passes **30 backend, analytics, API, and mocked-AI tests**.
 The frontend production build passes, and the production dependency audit reports
 no known vulnerabilities. Automated tests never make real Gemini calls, so live
 Gemini connectivity remains pending until a real key-backed smoke test passes.
@@ -182,7 +182,8 @@ The minimal deployment is React on Vercel and FastAPI on Render.
 - Build command: `pip install -r requirements.txt`
 - Start command: `uvicorn backend.api.main:app --host 0.0.0.0 --port $PORT`
 - Health check path: `/api/health`
-- Required environment variable: `CORS_ORIGINS=https://<your-vercel-domain>`
+- Required environment variable: `FRONTEND_URL=https://<your-vercel-domain>`
+- Optional additional origins: `CORS_ORIGINS=https://<preview-domain>,https://<other-domain>`
 - Optional AI variables: `GEMINI_API_KEY`, `GEMINI_MODEL`, and
   `GEMINI_TIMEOUT_SECONDS`
 
@@ -196,7 +197,7 @@ The minimal deployment is React on Vercel and FastAPI on Render.
   `VITE_API_BASE_URL=https://<your-render-service>`
 
 Deploy Render first, then supply its URL to Vercel. After Vercel assigns the final
-domain, set that exact origin in Render's `CORS_ORIGINS` and redeploy the backend.
+domain, set that exact origin in Render's `FRONTEND_URL` and redeploy the backend.
 `frontend/vercel.json` provides the SPA route fallback. Keep `GEMINI_API_KEY` in
 Render only; never expose it through a `VITE_` variable.
 
@@ -481,9 +482,9 @@ Example custom-scoring request:
   invalid input.
 
 The V1 cache is per application process. City names are unique in the current
-dataset, and state matching is case-insensitive. CORS defaults to the common local
-React origins on ports 3000 and 5173 and can be configured for production with
-the comma-separated `CORS_ORIGINS` variable.
+dataset, and state matching is case-insensitive. CORS always includes the common
+local React origins on ports 3000 and 5173, adds the production `FRONTEND_URL`,
+and accepts optional extra origins through comma-separated `CORS_ORIGINS`.
 
 ## Generative AI Architecture
 

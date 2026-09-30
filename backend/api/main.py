@@ -17,12 +17,14 @@ DEFAULT_CORS_ORIGINS = (
 
 
 def configured_cors_origins() -> list[str]:
-    """Return comma-separated browser origins, with safe local defaults."""
-    return [
-        origin.strip()
-        for origin in os.getenv("CORS_ORIGINS", DEFAULT_CORS_ORIGINS).split(",")
-        if origin.strip()
+    """Return local, deployed frontend, and optional extra browser origins."""
+    candidates = [
+        *DEFAULT_CORS_ORIGINS.split(","),
+        os.getenv("FRONTEND_URL", ""),
+        *os.getenv("CORS_ORIGINS", "").split(","),
     ]
+    origins = [origin.strip().rstrip("/") for origin in candidates if origin.strip()]
+    return list(dict.fromkeys(origins))
 
 
 @asynccontextmanager

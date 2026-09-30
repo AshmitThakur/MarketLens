@@ -120,12 +120,32 @@ class ApiTests(unittest.TestCase):
 
         with patch.dict(
             "os.environ",
-            {"CORS_ORIGINS": "https://marketlens.vercel.app, https://preview.example"},
+            {
+                "FRONTEND_URL": "",
+                "CORS_ORIGINS": "https://marketlens.vercel.app, https://preview.example",
+            },
         ):
-            self.assertEqual(
-                configured_cors_origins(),
-                ["https://marketlens.vercel.app", "https://preview.example"],
-            )
+            origins = configured_cors_origins()
+            self.assertIn("http://localhost:5173", origins)
+            self.assertIn("http://127.0.0.1:5173", origins)
+            self.assertIn("https://marketlens.vercel.app", origins)
+            self.assertIn("https://preview.example", origins)
+
+    def test_frontend_url_is_allowed_and_normalized_for_production(self) -> None:
+        from backend.api.main import configured_cors_origins
+
+        with patch.dict(
+            "os.environ",
+            {
+                "FRONTEND_URL": "https://market-lens-livid-rho.vercel.app/",
+                "CORS_ORIGINS": "",
+            },
+        ):
+            origins = configured_cors_origins()
+            self.assertIn("https://market-lens-livid-rho.vercel.app", origins)
+            self.assertNotIn("https://market-lens-livid-rho.vercel.app/", origins)
+            self.assertIn("http://localhost:3000", origins)
+            self.assertIn("http://127.0.0.1:5173", origins)
 
     def test_environment_file_is_resolved_from_project_root(self) -> None:
         from backend.api.dependencies import ENV_FILE, PROJECT_ROOT
