@@ -166,7 +166,7 @@ npm.cmd run build
 npm.cmd audit --omit=dev
 ```
 
-The current release passes **32 backend, analytics, API, and mocked-AI tests**.
+The current release passes **37 backend, analytics, API, and mocked-AI tests**.
 The frontend production build passes, and the production dependency audit reports
 no known vulnerabilities. Automated tests never make real Gemini calls, so live
 Gemini connectivity remains pending until a real key-backed smoke test passes.
@@ -539,6 +539,12 @@ GEMINI_TIMEOUT_SECONDS=30
 If the key is absent, AI endpoints return HTTP 503. Upstream or malformed-response
 failures return a clean HTTP 502. All analytics and non-AI dashboard routes remain
 available.
+
+Transient Gemini HTTP 429 and 503 responses receive at most two retries after the
+initial request. The retry delay uses exponential backoff, small random jitter,
+and any provider `Retry-After` value, while all attempts share the configured
+`GEMINI_TIMEOUT_SECONDS` deadline. Permanent provider errors and structured-output
+validation failures are not retried.
 
 ### Example grounded comparison
 

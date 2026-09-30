@@ -1,7 +1,7 @@
 """Tests for grounded AI routes without making Gemini API calls."""
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 from google.genai import errors
@@ -168,7 +168,9 @@ class AiApiTests(unittest.TestCase):
         )
         service = GeminiService(api_key=api_key, model="gemini-3.8-flash")
 
-        with patch("google.genai.Client") as client_class:
+        with patch("google.genai.Client") as client_class, patch(
+            "backend.ai.gemini_service.time.sleep"
+        ):
             client_class.return_value.models.generate_content.side_effect = provider_error
             with self.assertLogs("backend.ai.gemini_service", level="ERROR") as logs:
                 with self.assertRaises(AIServiceError):
@@ -181,6 +183,118 @@ class AiApiTests(unittest.TestCase):
         self.assertIn("[REDACTED]", rendered_log)
         self.assertNotIn(api_key, rendered_log)
         self.assertNotIn("sensitive-token", rendered_log)
+
+    def test_transient_provider_error_retries_then_succeeds(self) -> None:
+        transient_error = errors.APIError(
+            503,
+            {"error": {"message": "High demand", "status": "UNAVAILABLE"}},
+        )
+        expected = CityComparisonResponse(
+            city_a="Quito",
+            city_b="Cuenca",
+            summary="Quito leads under the supplied weights.",
+            advantages_city_a=["Higher activity scores."],
+            advantages_city_b=["Higher growth score."],
+            main_tradeoffs=["Current activity versus growth."],
+            management_interpretation="Prioritize additional due diligence.",
+        )
+        response = Mock(parsed=expected, text=None)
+        service = GeminiService(api_key="test-key", timeout_seconds=10)
+
+        with patch("google.genai.Client") as client_class, patch(
+            "backend.ai.gemini_service.random.uniform", return_value=0.1
+        ), patch("backend.ai.gemini_service.time.sleep") as sleep:
+            generate = client_class.return_value.models.generate_content
+            generate.side_effect = [transient_error, response]
+            result = service._generate("diagnostic test", CityComparisonResponse)
+
+        self.assertEqual(result, expected)
+        self.assertEqual(generate.call_count, 2)
+        sleep.assert_called_once_with(0.6)
+
+    def test_transient_provider_error_stops_after_two_retries(self) -> None:
+        transient_error = errors.APIError(
+            503,
+            {"error": {"message": "High demand", "status": "UNAVAILABLE"}},
+        )
+        service = GeminiService(api_key="test-key", timeout_seconds=10)
+
+        with patch("google.genai.Client") as client_class, patch(
+            "backend.ai.gemini_service.random.uniform", return_value=0.0
+        ), patch("backend.ai.gemini_service.time.sleep") as sleep:
+            generate = client_class.return_value.models.generate_content
+            generate.side_effect = transient_error
+            with self.assertRaises(AIServiceError):
+                service._generate("diagnostic test", CityComparisonResponse)
+
+        self.assertEqual(generate.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_permanent_provider_error_is_not_retried(self) -> None:
+        permanent_error = errors.APIError(
+            401,
+            {"error": {"message": "Invalid credentials", "status": "UNAUTHENTICATED"}},
+        )
+        service = GeminiService(api_key="test-key", timeout_seconds=10)
+
+        with patch("google.genai.Client") as client_class, patch(
+            "backend.ai.gemini_service.time.sleep"
+        ) as sleep:
+            generate = client_class.return_value.models.generate_content
+            generate.side_effect = permanent_error
+            with self.assertRaises(AIServiceError):
+                service._generate("diagnostic test", CityComparisonResponse)
+
+        self.assertEqual(generate.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_retry_is_skipped_when_total_deadline_cannot_fit_delay(self) -> None:
+        transient_error = errors.APIError(
+            503,
+            {"error": {"message": "High demand", "status": "UNAVAILABLE"}},
+        )
+        service = GeminiService(api_key="test-key", timeout_seconds=1)
+
+        with patch("google.genai.Client") as client_class, patch(
+            "backend.ai.gemini_service.random.uniform", return_value=0.0
+        ), patch(
+            "backend.ai.gemini_service.time.monotonic",
+            side_effect=[0.0, 0.0, 0.75],
+        ), patch("backend.ai.gemini_service.time.sleep") as sleep:
+            generate = client_class.return_value.models.generate_content
+            generate.side_effect = transient_error
+            with self.assertRaises(AIServiceError):
+                service._generate("diagnostic test", CityComparisonResponse)
+
+        self.assertEqual(generate.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_retry_after_header_sets_minimum_delay(self) -> None:
+        response_headers = Mock(headers={"retry-after": "2"})
+        transient_error = errors.APIError(
+            429,
+            {"error": {"message": "Rate limited", "status": "RESOURCE_EXHAUSTED"}},
+            response=response_headers,
+        )
+        expected = CityComparisonResponse(
+            city_a="Quito",
+            city_b="Cuenca",
+            summary="Comparison completed.",
+            advantages_city_a=["Activity."],
+            advantages_city_b=["Growth."],
+            main_tradeoffs=["Activity versus growth."],
+            management_interpretation="Continue due diligence.",
+        )
+        service = GeminiService(api_key="test-key", timeout_seconds=10)
+
+        with patch("google.genai.Client") as client_class, patch(
+            "backend.ai.gemini_service.random.uniform", return_value=0.1
+        ), patch("backend.ai.gemini_service.time.sleep") as sleep:
+            generate = client_class.return_value.models.generate_content
+            generate.side_effect = [transient_error, Mock(parsed=expected, text=None)]
+            service._generate("diagnostic test", CityComparisonResponse)
+
+        sleep.assert_called_once_with(2.1)
 
     def test_structured_response_failure_logs_schema_without_response_body(self) -> None:
         service = GeminiService(api_key="test-key", model="gemini-3.8-flash")

@@ -2,7 +2,11 @@
 
 import logging
 import os
+import random
 import re
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -22,6 +26,10 @@ from .prompts import (
 
 ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
 LOGGER = logging.getLogger(__name__)
+TRANSIENT_PROVIDER_STATUSES = {429, 503}
+MAX_PROVIDER_ATTEMPTS = 3
+INITIAL_RETRY_DELAY_SECONDS = 0.5
+MAX_RETRY_JITTER_SECONDS = 0.25
 
 
 def _safe_provider_error_details(
@@ -55,6 +63,43 @@ def _safe_provider_error_details(
     return category, status, reason, description
 
 
+def _retry_after_seconds(error: Exception) -> float | None:
+    """Read Retry-After headers from a provider error when available."""
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+
+    retry_after_ms = headers.get("retry-after-ms")
+    if retry_after_ms is not None:
+        try:
+            return max(0.0, float(retry_after_ms) / 1000)
+        except (TypeError, ValueError):
+            pass
+
+    retry_after = headers.get("retry-after")
+    if retry_after is None:
+        return None
+    try:
+        return max(0.0, float(retry_after))
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(str(retry_after))
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+
+
+def _retry_delay_seconds(error: Exception, failed_attempt: int) -> float:
+    """Combine provider guidance with bounded exponential backoff and jitter."""
+    exponential_delay = INITIAL_RETRY_DELAY_SECONDS * (2 ** (failed_attempt - 1))
+    provider_delay = _retry_after_seconds(error) or 0.0
+    jitter = random.uniform(0.0, MAX_RETRY_JITTER_SECONDS)
+    return max(exponential_delay, provider_delay) + jitter
+
+
 class AIConfigurationError(RuntimeError):
     """Raised when Gemini is not configured."""
 
@@ -81,6 +126,7 @@ class GeminiService:
         configured_timeout = timeout_seconds or float(
             os.getenv("GEMINI_TIMEOUT_SECONDS", "30")
         )
+        self.timeout_seconds = configured_timeout
         self.timeout_ms = int(configured_timeout * 1000)
 
     def executive_insights(self, context: dict) -> ExecutiveInsightsResponse:
@@ -112,20 +158,69 @@ class GeminiService:
             from google import genai
             from google.genai import types
 
-            client = genai.Client(
-                api_key=self.api_key,
-                http_options=types.HttpOptions(timeout=self.timeout_ms),
+            config = types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.2,
+                response_mime_type="application/json",
+                response_schema=response_model,
             )
-            response = client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    temperature=0.2,
-                    response_mime_type="application/json",
-                    response_schema=response_model,
-                ),
-            )
+            deadline = time.monotonic() + self.timeout_seconds
+
+            for attempt in range(1, MAX_PROVIDER_ATTEMPTS + 1):
+                remaining_seconds = deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    raise TimeoutError("Gemini request deadline was exhausted.")
+
+                client = genai.Client(
+                    api_key=self.api_key,
+                    http_options=types.HttpOptions(
+                        timeout=max(1, int(remaining_seconds * 1000)),
+                        retry_options=types.HttpRetryOptions(attempts=1),
+                    ),
+                )
+                try:
+                    try:
+                        response = client.models.generate_content(
+                            model=self.model,
+                            contents=prompt,
+                            config=config,
+                        )
+                    finally:
+                        client.close()
+                    break
+                except Exception as error:
+                    status = getattr(error, "code", None) or getattr(
+                        error, "status_code", None
+                    )
+                    if (
+                        status not in TRANSIENT_PROVIDER_STATUSES
+                        or attempt >= MAX_PROVIDER_ATTEMPTS
+                    ):
+                        raise
+
+                    delay_seconds = _retry_delay_seconds(error, attempt)
+                    remaining_seconds = deadline - time.monotonic()
+                    if delay_seconds >= remaining_seconds:
+                        raise
+
+                    category, _, reason, description = _safe_provider_error_details(
+                        error, self.api_key
+                    )
+                    LOGGER.warning(
+                        "Gemini transient provider error; retrying: category=%s "
+                        "provider_status=%s provider_reason=%s model=%s "
+                        "failed_attempt=%s next_attempt=%s delay_seconds=%.2f "
+                        "description=%s",
+                        category,
+                        status,
+                        reason if reason is not None else "unavailable",
+                        self.model,
+                        attempt,
+                        attempt + 1,
+                        delay_seconds,
+                        description,
+                    )
+                    time.sleep(delay_seconds)
         except AIConfigurationError:
             raise
         except Exception as error:
