@@ -1,6 +1,8 @@
 """API contract tests for MarketLens Phase 2."""
 
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -114,8 +116,6 @@ class ApiTests(unittest.TestCase):
         )
 
     def test_cors_origins_can_be_configured_for_deployment(self) -> None:
-        from unittest.mock import patch
-
         from backend.api.main import configured_cors_origins
 
         with patch.dict(
@@ -126,6 +126,25 @@ class ApiTests(unittest.TestCase):
                 configured_cors_origins(),
                 ["https://marketlens.vercel.app", "https://preview.example"],
             )
+
+    def test_environment_file_is_resolved_from_project_root(self) -> None:
+        from backend.api.dependencies import ENV_FILE, PROJECT_ROOT
+
+        expected_root = Path(__file__).resolve().parents[1]
+        self.assertEqual(PROJECT_ROOT, expected_root)
+        self.assertEqual(ENV_FILE, expected_root / ".env")
+        self.assertTrue(ENV_FILE.is_absolute())
+
+    def test_ai_service_reads_environment_after_initialization(self) -> None:
+        from backend.api.dependencies import get_ai_service
+
+        get_ai_service.cache_clear()
+        try:
+            with patch.dict("os.environ", {"GEMINI_API_KEY": "test-only-key"}):
+                service = get_ai_service()
+                self.assertEqual(service.api_key, "test-only-key")
+        finally:
+            get_ai_service.cache_clear()
 
 
 if __name__ == "__main__":
