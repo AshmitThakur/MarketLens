@@ -1,0 +1,43 @@
+{
+  "earliest_dataset_date": "2013-01-01",
+  "latest_dataset_date": "2017-08-15",
+  "total_stores": 54,
+  "number_of_cities": 22,
+  "number_of_states": 16,
+  "number_of_product_families": 33,
+  "missing_values": {
+    "train.csv": {
+      "id": 0,
+      "date": 0,
+      "store_nbr": 0,
+      "family": 0,
+      "sales": 0,
+      "onpromotion": 0
+    },
+    "stores.csv": {
+      "store_nbr": 0,
+      "city": 0,
+      "state": 0,
+      "type": 0,
+      "cluster": 0
+    },
+    "transactions.csv": {
+      "date": 0,
+      "store_nbr": 0,
+      "transactions": 0
+    }
+  },
+  "comparable_stores": 53,
+  "sales_stores_without_any_transactions": 0,
+  "positive_sales_store_days_without_transactions": 118,
+  "growth_windows": {
+    "previous": [
+      "2015-08-17",
+      "2016-08-15"
+    ],
+    "current": [
+      "2016-08-16",
+      "2017-08-15"
+    ]
+  }
+}
