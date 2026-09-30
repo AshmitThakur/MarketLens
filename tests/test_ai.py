@@ -1,11 +1,14 @@
 """Tests for grounded AI routes without making Gemini API calls."""
 
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from google.genai import errors
 from pydantic import ValidationError
 
 from backend.ai.gemini_service import (
+    AIResponseError,
     AIServiceError,
     GeminiService,
 )
@@ -148,6 +151,51 @@ class AiApiTests(unittest.TestCase):
             ExecutiveInsightsResponse.model_validate(
                 {"executive_summary": "Incomplete response"}
             )
+
+    def test_provider_error_logging_is_diagnostic_and_redacted(self) -> None:
+        api_key = "AIza" + "A" * 35
+        provider_error = errors.APIError(
+            429,
+            {
+                "error": {
+                    "message": (
+                        f"Quota exceeded for api_key={api_key} "
+                        "authorization=Bearer sensitive-token"
+                    ),
+                    "status": "RESOURCE_EXHAUSTED",
+                }
+            },
+        )
+        service = GeminiService(api_key=api_key, model="gemini-3.8-flash")
+
+        with patch("google.genai.Client") as client_class:
+            client_class.return_value.models.generate_content.side_effect = provider_error
+            with self.assertLogs("backend.ai.gemini_service", level="ERROR") as logs:
+                with self.assertRaises(AIServiceError):
+                    service._generate("diagnostic test", CityComparisonResponse)
+
+        rendered_log = " ".join(logs.output)
+        self.assertIn("category=APIError", rendered_log)
+        self.assertIn("provider_status=429", rendered_log)
+        self.assertIn("RESOURCE_EXHAUSTED", rendered_log)
+        self.assertIn("[REDACTED]", rendered_log)
+        self.assertNotIn(api_key, rendered_log)
+        self.assertNotIn("sensitive-token", rendered_log)
+
+    def test_structured_response_failure_logs_schema_without_response_body(self) -> None:
+        service = GeminiService(api_key="test-key", model="gemini-3.8-flash")
+
+        with patch("google.genai.Client") as client_class:
+            response = client_class.return_value.models.generate_content.return_value
+            response.parsed = None
+            response.text = '{"summary": "secret response body"}'
+            with self.assertLogs("backend.ai.gemini_service", level="ERROR") as logs:
+                with self.assertRaises(AIResponseError):
+                    service._generate("diagnostic test", CityComparisonResponse)
+
+        rendered_log = " ".join(logs.output)
+        self.assertIn("schema=CityComparisonResponse", rendered_log)
+        self.assertNotIn("secret response body", rendered_log)
 
 
 if __name__ == "__main__":

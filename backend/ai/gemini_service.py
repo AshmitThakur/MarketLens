@@ -1,6 +1,8 @@
 """Small, mockable wrapper around the Google Gen AI SDK."""
 
+import logging
 import os
+import re
 from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -19,6 +21,38 @@ from .prompts import (
 
 
 ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
+LOGGER = logging.getLogger(__name__)
+
+
+def _safe_provider_error_details(
+    error: Exception, api_key: str
+) -> tuple[str, int | str | None, str | None, str]:
+    """Extract useful provider diagnostics without exposing credentials."""
+    category = type(error).__name__
+    status = getattr(error, "code", None) or getattr(error, "status_code", None)
+    reason = getattr(error, "status", None)
+    description = getattr(error, "message", None) or str(error)
+    description = str(description)
+
+    if api_key:
+        description = description.replace(api_key, "[REDACTED]")
+    description = re.sub(
+        r"(?i)Bearer\s+[^\s,;]+",
+        "Bearer [REDACTED]",
+        description,
+    )
+    description = re.sub(
+        r"(?i)((?:api[_-]?key|x-goog-api-key|authorization|token|credential)"
+        r"\s*[:=]\s*)[^\s,;]+",
+        r"\1[REDACTED]",
+        description,
+    )
+    description = re.sub(r"AIza[0-9A-Za-z_-]+", "[REDACTED]", description)
+    description = " ".join(description.split())[:500]
+    if not description:
+        description = "No safe provider description was available."
+
+    return category, status, reason, description
 
 
 class AIConfigurationError(RuntimeError):
@@ -66,6 +100,10 @@ class GeminiService:
         self, prompt: str, response_model: type[ResponseModel]
     ) -> ResponseModel:
         if not self.api_key or self.api_key == "your_api_key_here":
+            LOGGER.error(
+                "Gemini configuration error: category=missing_api_key model=%s",
+                self.model,
+            )
             raise AIConfigurationError(
                 "Gemini is not configured. Set GEMINI_API_KEY in the backend environment."
             )
@@ -91,6 +129,18 @@ class GeminiService:
         except AIConfigurationError:
             raise
         except Exception as error:
+            category, status, reason, description = _safe_provider_error_details(
+                error, self.api_key
+            )
+            LOGGER.error(
+                "Gemini provider request failed: category=%s provider_status=%s "
+                "provider_reason=%s model=%s description=%s",
+                category,
+                status if status is not None else "unavailable",
+                reason if reason is not None else "unavailable",
+                self.model,
+                description,
+            )
             raise AIServiceError(
                 "Gemini is temporarily unavailable. The analytics dashboard remains available."
             ) from error
@@ -102,6 +152,15 @@ class GeminiService:
                 raise ValueError("Gemini returned an empty response")
             return response_model.model_validate_json(response.text)
         except (ValidationError, ValueError, TypeError) as error:
+            error_count = error.error_count() if isinstance(error, ValidationError) else 1
+            LOGGER.error(
+                "Gemini structured response validation failed: category=%s model=%s "
+                "schema=%s error_count=%s",
+                type(error).__name__,
+                self.model,
+                response_model.__name__,
+                error_count,
+            )
             raise AIResponseError(
                 "Gemini returned a response that did not match the expected structure."
             ) from error
